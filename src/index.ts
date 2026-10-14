@@ -1,6 +1,7 @@
 import * as monaco from 'monaco-editor';
 import editorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker';
 import { AudioEngine } from './AudioEngine';
+import { findDataFile } from './dataFiles';
 import { examples } from './examples';
 import { exportProject } from './exportProject';
 import { FPSCounter } from './FPSCounter';
@@ -71,7 +72,7 @@ const fileExplorer = new FileExplorer({
   container: document.getElementById('file-explorer')!,
   editorModel: editor.getModel()!,
   getSources: () => currentProject.sources,
-  getDataFiles: () => currentProject.dataFiles,
+  getDataFiles: () => (currentProject.dataFiles ??= {}),
   getEditorValue: () => editor.getValue(),
   setEditorValue: (v) => {
     suppressEditorChange = true;
@@ -110,7 +111,7 @@ async function initModule(modules: Record<string, HDLModuleDef>) {
   if (jmod) jmod.dispose();
   jmod = new HDLModuleWASM(modules['TOP'], modules['@CONST-POOL@']);
   await jmod.init();
-  jmod.getFileData = (path) => currentProject.dataFiles?.[path];
+  jmod.getFileData = (path) => findDataFile(currentProject.dataFiles, path);
   uo_out_offset = jmod.globals.lookup('uo_out').offset;
   uio_out_offset = jmod.globals.lookup('uio_out').offset;
   uio_oe_offset = jmod.globals.lookup('uio_oe').offset;

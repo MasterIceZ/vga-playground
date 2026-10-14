@@ -1,4 +1,5 @@
 import { downloadZip } from 'client-zip';
+import { dataFileDisplayPath } from './dataFiles';
 import { Project } from './examples/Project';
 import requirementsTxt from './examples/export/test/requirements.txt?raw';
 import testPy from './examples/export/test/test.py?raw';
@@ -93,6 +94,11 @@ export async function exportProject(project: Project) {
     },
     ...Object.entries(project.sources).map(([name, content]) => ({
       name: 'src/' + name,
+      date: currentTime,
+      input: content,
+    })),
+    ...Object.entries(project.dataFiles ?? {}).map(([path, content]) => ({
+      name: dataFileDisplayPath(path),
       date: currentTime,
       input: content,
     })),

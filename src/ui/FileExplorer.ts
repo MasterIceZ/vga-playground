@@ -1,4 +1,5 @@
 import * as monaco from 'monaco-editor';
+import { dataFileDisplayPath, dataFileKey, parseDataFilePath } from '../dataFiles';
 import { IErrorMessage } from '../verilator/ErrorParser';
 import { readStorage, readStoredNumber, writeStorage } from './storage';
 
@@ -9,7 +10,7 @@ export interface FileExplorerOptions {
   editorModel: monaco.editor.ITextModel;
   getSources: () => Record<string, string>;
   /** Files read via $readmem, keyed by the path as written (relative to src/) */
-  getDataFiles: () => Record<string, string> | undefined;
+  getDataFiles: () => Record<string, string>;
   getEditorValue: () => string;
   setEditorValue: (value: string) => void;
 }
@@ -28,6 +29,12 @@ const ICON_COLLAPSE = `<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M10 
 const ICON_EXPAND = `<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6 4l4 4-4 4"/></svg>`;
 const ICON_FILE = `<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M9.2 2H4.5a1 1 0 00-1 1v10a1 1 0 001 1h7a1 1 0 001-1V5.3L9.2 2z"/><path d="M9 2.2v3.3h3.4"/></svg>`;
 
+interface ContextMenuItem {
+  label: string;
+  hint: string;
+  action: () => void;
+}
+
 export function isValidFileName(name: string) {
   return VALID_EXTENSIONS.some((ext) => name.endsWith(ext)) && !name.includes('/');
 }
@@ -41,7 +48,7 @@ export class FileExplorer {
   private readonly container: HTMLElement;
   private readonly editorModel: monaco.editor.ITextModel;
   private readonly getSources: () => Record<string, string>;
-  private readonly getDataFiles: () => Record<string, string> | undefined;
+  private readonly getDataFiles: () => Record<string, string>;
   private readonly getEditorValue: () => string;
   private readonly setEditorValue: (value: string) => void;
 
@@ -135,15 +142,14 @@ export class FileExplorer {
     for (const fileName of sortFileNames(Object.keys(this.getSources()))) {
       folders.get('src')!.push({ name: fileName });
     }
-    const dataPaths = Object.keys(this.getDataFiles() ?? {}).sort((a, b) =>
+    const dataPaths = Object.keys(this.getDataFiles()).sort((a, b) =>
       dataFileDisplayPath(a).localeCompare(dataFileDisplayPath(b)),
     );
     for (const dataPath of dataPaths) {
       const display = dataFileDisplayPath(dataPath);
-      const slash = display.lastIndexOf('/');
-      const folder = slash < 0 ? '' : display.slice(0, slash);
+      const folder = folderOf(display);
       if (!folders.has(folder)) folders.set(folder, []);
-      folders.get(folder)!.push({ name: display.slice(slash + 1), dataPath });
+      folders.get(folder)!.push({ name: display.slice(display.lastIndexOf('/') + 1), dataPath });
     }
 
     const hadFocus = this.fileList.contains(document.activeElement);
@@ -163,6 +169,11 @@ export class FileExplorer {
           else this.collapsedFolders.delete(folder);
           this.render();
         });
+        folderRow.addEventListener('contextmenu', (e) =>
+          this.showContextMenu(e, [
+            { label: 'New File...', hint: '', action: () => this.createFile(folder) },
+          ]),
+        );
         this.fileList.appendChild(folderRow);
       }
       if (!expanded) continue;
@@ -209,7 +220,13 @@ export class FileExplorer {
         this.switchTo(fileName);
       }
     });
-    row.addEventListener('contextmenu', (e) => this.showContextMenu(e, fileName));
+    row.addEventListener('contextmenu', (e) => {
+      const items = [{ label: 'Rename', hint: 'F2', action: () => this.renameFile(fileName) }];
+      if (Object.keys(this.getSources()).length > 1) {
+        items.push({ label: 'Delete', hint: 'Del', action: () => this.deleteFile(fileName) });
+      }
+      this.showContextMenu(e, items);
+    });
     return row;
   }
 
@@ -225,6 +242,12 @@ export class FileExplorer {
         this.openDataFile(dataPath);
       }
     });
+    row.addEventListener('contextmenu', (e) =>
+      this.showContextMenu(e, [
+        { label: 'Rename', hint: 'F2', action: () => this.renameDataFile(dataPath) },
+        { label: 'Delete', hint: 'Del', action: () => this.deleteDataFile(dataPath) },
+      ]),
+    );
     return row;
   }
 
@@ -254,9 +277,8 @@ export class FileExplorer {
   /** Writes the editor's contents back to whichever file is open. */
   private saveCurrent() {
     const value = this.getEditorValue();
-    const dataFiles = this.getDataFiles();
-    if (this.currentDataFile != null && dataFiles) {
-      dataFiles[this.currentDataFile] = value;
+    if (this.currentDataFile != null) {
+      this.getDataFiles()[this.currentDataFile] = value;
     } else {
       this.getSources()[this.currentFileName] = value;
     }
@@ -273,7 +295,7 @@ export class FileExplorer {
     this.saveCurrent();
     this.currentDataFile = dataPath;
     monaco.editor.setModelLanguage(this.editorModel, 'plaintext');
-    this.setEditorValue(this.getDataFiles()?.[dataPath] ?? '');
+    this.setEditorValue(this.getDataFiles()[dataPath] ?? '');
     this.render();
     this.updateEditorMarkers();
   }
@@ -357,8 +379,7 @@ export class FileExplorer {
     const rows = Array.from(this.fileList.querySelectorAll<HTMLElement>('.explorer-file'));
     const index = rows.findIndex((row) => row === document.activeElement);
     if (index < 0) return;
-    // Data files can be opened but not renamed or deleted
-    const fileName = rows[index].dataset.fileName;
+    const { fileName, dataPath } = rows[index].dataset;
 
     switch (e.key) {
       case 'ArrowDown':
@@ -376,25 +397,38 @@ export class FileExplorer {
         break;
       }
       case 'F2':
-        if (fileName == null) break;
         e.preventDefault();
-        this.renameFile(fileName);
+        if (dataPath != null) this.renameDataFile(dataPath);
+        else if (fileName != null) this.renameFile(fileName);
         break;
       case 'Delete':
-        if (fileName == null) break;
         e.preventDefault();
-        this.deleteFile(fileName);
+        if (dataPath != null) this.deleteDataFile(dataPath);
+        else if (fileName != null) this.deleteFile(fileName);
         break;
     }
   }
 
-  private createFile() {
-    const name = prompt(`New file name (${VALID_EXTENSIONS.join(', ')}):`, 'new_module.v');
-    if (!name) return;
-    if (!isValidFileName(name)) {
-      alert(`File name must end with one of: ${VALID_EXTENSIONS.join(', ')}`);
-      return;
+  /**
+   * Asks for a file name and creates it: a Verilog source in src/, or any other
+   * file as a $readmem data file at that path from the project root.
+   */
+  private createFile(folder = '') {
+    const input = prompt(
+      `New file name: a Verilog file in src/ (${VALID_EXTENSIONS.join(', ')}), ` +
+        `or a data file for $readmem with its path from the project root (e.g. data/image.mem):`,
+      folder === '' || folder === 'src' ? 'new_module.v' : `${folder}/`,
+    );
+    if (!input) return;
+    const name = input.trim().replace(/^src\//, '');
+    if (isValidFileName(name)) {
+      this.createSourceFile(name);
+    } else {
+      this.createDataFile(input);
     }
+  }
+
+  private createSourceFile(name: string) {
     const sources = this.getSources();
     if (sources[name] != null) {
       alert('A file with that name already exists');
@@ -407,6 +441,73 @@ export class FileExplorer {
     monaco.editor.setModelLanguage(this.editorModel, 'systemverilog');
     this.setEditorValue('');
     this.collapsedFolders.delete('src');
+    this.render();
+    this.updateEditorMarkers();
+  }
+
+  private createDataFile(input: string) {
+    const displayPath = this.promptedDataFilePath(input);
+    if (displayPath == null) return;
+    this.saveCurrent();
+    const dataPath = dataFileKey(displayPath);
+    this.getDataFiles()[dataPath] = '';
+    this.currentDataFile = dataPath;
+    monaco.editor.setModelLanguage(this.editorModel, 'plaintext');
+    this.setEditorValue('');
+    this.collapsedFolders.delete(folderOf(displayPath));
+    this.render();
+    this.updateEditorMarkers();
+  }
+
+  /**
+   * Validates a data file path the user typed, alerting if it's unusable.
+   *
+   * @returns the path from the project root, or null if it was rejected
+   */
+  private promptedDataFilePath(input: string, ignore?: string) {
+    const parsed = parseDataFilePath(input);
+    if ('error' in parsed) {
+      alert(parsed.error);
+      return null;
+    }
+    const taken =
+      Object.keys(this.getDataFiles()).some(
+        (key) => key !== ignore && dataFileDisplayPath(key) === parsed.path,
+      ) || this.getSources()[parsed.path.replace(/^src\//, '')] != null;
+    if (taken) {
+      alert('A file with that name already exists');
+      return null;
+    }
+    return parsed.path;
+  }
+
+  private renameDataFile(dataPath: string) {
+    const oldPath = dataFileDisplayPath(dataPath);
+    const input = prompt('Rename file:', oldPath);
+    if (!input || input.trim() === oldPath) return;
+    const displayPath = this.promptedDataFilePath(input, dataPath);
+    if (displayPath == null) return;
+    const dataFiles = this.getDataFiles();
+    const newDataPath = dataFileKey(displayPath);
+    if (this.currentDataFile === dataPath) {
+      this.saveCurrent();
+      this.currentDataFile = newDataPath;
+    }
+    const content = dataFiles[dataPath];
+    delete dataFiles[dataPath];
+    dataFiles[newDataPath] = content;
+    this.render();
+  }
+
+  private deleteDataFile(dataPath: string) {
+    if (!confirm(`Delete "${dataFileDisplayPath(dataPath)}"?`)) return;
+    delete this.getDataFiles()[dataPath];
+    if (this.currentDataFile === dataPath) {
+      this.currentDataFile = null;
+      monaco.editor.setModelLanguage(this.editorModel, 'systemverilog');
+      this.setEditorValue(this.getSources()[this.currentFileName]);
+      this.updateEditorMarkers();
+    }
     this.render();
   }
 
@@ -449,21 +550,16 @@ export class FileExplorer {
     this.contextMenu.hidden = true;
   }
 
-  private showContextMenu(e: MouseEvent, fileName: string) {
+  private showContextMenu(e: MouseEvent, items: ContextMenuItem[]) {
     e.preventDefault();
     this.contextMenu.innerHTML = '';
 
-    const addItem = (label: string, hint: string, action: () => void) => {
+    for (const { label, hint, action } of items) {
       const item = document.createElement('div');
       item.className = 'explorer-context-menu-item';
       item.innerHTML = `<span>${label}</span><span class="menu-hint">${hint}</span>`;
       item.addEventListener('click', action);
       this.contextMenu.appendChild(item);
-    };
-
-    addItem('Rename', 'F2', () => this.renameFile(fileName));
-    if (Object.keys(this.getSources()).length > 1) {
-      addItem('Delete', 'Del', () => this.deleteFile(fileName));
     }
 
     this.contextMenu.hidden = false;
@@ -473,14 +569,10 @@ export class FileExplorer {
   }
 }
 
-/** Maps a $readmem path (relative to src/) to its path from the project root. */
-export function dataFileDisplayPath(path: string) {
-  const resolved: string[] = [];
-  for (const part of `src/${path}`.split('/')) {
-    if (part === '..') resolved.pop();
-    else if (part !== '.' && part !== '') resolved.push(part);
-  }
-  return resolved.join('/');
+/** The folder a path from the project root is shown in ('' for the root). */
+function folderOf(displayPath: string) {
+  const slash = displayPath.lastIndexOf('/');
+  return slash < 0 ? '' : displayPath.slice(0, slash);
 }
 
 /** Keeps the project's entry file on top, then sorts the rest like a file tree. */

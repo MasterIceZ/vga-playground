@@ -1,3 +1,4 @@
+import { dataFileDisplayPath } from '../dataFiles';
 import { Project } from '../examples/Project';
 
 export interface RepoRef {
@@ -76,19 +77,6 @@ export function extractIncludePaths(sources: Record<string, string>): string[] {
     paths.delete(name);
   }
   return [...paths];
-}
-
-function resolveRelativeToSrc(path: string): string {
-  const parts = ('src/' + path).split('/');
-  const resolved: string[] = [];
-  for (const part of parts) {
-    if (part === '..') {
-      resolved.pop();
-    } else if (part !== '.') {
-      resolved.push(part);
-    }
-  }
-  return resolved.join('/');
 }
 
 function githubRawUrl(owner: string, repo: string, branch: string, path: string): string {
@@ -180,7 +168,7 @@ export async function loadProjectFromRepo(repoUrl: string, ref?: string | null):
 
   // Fetch data files referenced via $readmemh/$readmemb
   const dataEntries = await tryFetchFiles(extractReadmemPaths(sources), (p) =>
-    githubRawUrl(owner, repo, branch, base + resolveRelativeToSrc(p)),
+    githubRawUrl(owner, repo, branch, base + dataFileDisplayPath(p)),
   );
   const dataFiles = dataEntries.length > 0 ? Object.fromEntries(dataEntries) : undefined;
 
