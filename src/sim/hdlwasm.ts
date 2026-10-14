@@ -267,7 +267,6 @@ export class HDLModuleWASM implements HDLModuleRunner {
     this.constpool = constpool;
     this.maxMemoryMB = maxMemoryMB || 16;
     this.genMemory();
-    this.tempsStart = this.globals.len;
     this.genFuncs();
     this.validate();
   }
@@ -458,6 +457,15 @@ export class HDLModuleWASM implements HDLModuleRunner {
     state.addEntry(TRACEEND, 4, binaryen.i32);
     state.addEntry(TRACEBUF, this.traceBufferSize);
     this.traceRecordSize = this.outputbytes;
+    // function locals of reference type (e.g. an array Verilator moved into the
+    // initial block that is its only user) get promoted to globals; place them
+    // here so memory is sized to fit them
+    this.tempsStart = state.len;
+    for (var block of this.hdlmod.blocks) {
+      for (var e of block.exprs) {
+        if (e && isVarDecl(e) && isReferenceType(e.dtype)) state.addVar(e);
+      }
+    }
   }
 
   private genFuncs() {
@@ -514,9 +522,8 @@ export class HDLModuleWASM implements HDLModuleRunner {
     block.exprs.forEach((e) => {
       if (e && isVarDecl(e)) {
         // TODO: make local reference types, instead of promoting local arrays to global
-        if (isReferenceType(e.dtype)) {
-          this.globals.addVar(e);
-        } else {
+        // (genTypes already placed those in the globals)
+        if (!isReferenceType(e.dtype)) {
           fscope.addVar(e);
         }
       }

@@ -854,6 +854,38 @@ describe('Full Verilog -> WASM Pipeline', () => {
       expect(() => mod.powercycle()).toThrow(/too much data/);
       mod.dispose();
     });
+
+    test('should load a memory that is only used by its $readmem', async () => {
+      // Regression: Verilator moves an array whose only user is the initial
+      // block into that block's function; the array was promoted to a global
+      // after memory had been sized, so it ran past the end of memory
+      // ("Invalid typed array length").
+      const verilog = `
+        module readmem_unused(
+          input wire [1:0] idx,
+          output wire [7:0] val
+        );
+          reg [7:0] used[0:3];
+          /* verilator lint_off UNUSED */
+          reg [7:0] unused[0:131071];
+          /* verilator lint_on UNUSED */
+          initial begin
+            $readmemh("../data/used.hex", used);
+            $readmemh("../data/unused.hex", unused);
+          end
+          assign val = used[idx];
+        endmodule
+      `;
+      const mod = await compileAndCreate('readmem_unused', { 'readmem_unused.v': verilog });
+      mod.getFileData = (fn) => (fn.includes('unused') ? 'ff '.repeat(131072) : '11 22 33 44');
+      mod.powercycle();
+      for (const [i, expected] of [0x11, 0x22, 0x33, 0x44].entries()) {
+        mod.state.idx = i;
+        mod.eval();
+        expect(mod.state.val).toBe(expected);
+      }
+      mod.dispose();
+    });
   });
 
   describe('Signed comparisons', () => {
