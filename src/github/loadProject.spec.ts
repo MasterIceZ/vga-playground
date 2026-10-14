@@ -33,10 +33,31 @@ describe('parseRepoUrl', () => {
     expect(parseRepoUrl('urish/tt-rings.git/')).toEqual({ owner: 'urish', repo: 'tt-rings' });
   });
 
-  it('handles extra path segments', () => {
-    expect(parseRepoUrl('https://github.com/urish/tt-rings/tree/main/src')).toEqual({
+  it('parses ref from tree URL at repo root', () => {
+    expect(parseRepoUrl('https://github.com/urish/tt-rings/tree/main')).toEqual({
       owner: 'urish',
       repo: 'tt-rings',
+      ref: 'main',
+    });
+  });
+
+  it('parses ref and subdirectory from tree URL', () => {
+    expect(
+      parseRepoUrl('https://github.com/MasterIceZ/2110597-100/tree/main/lecture-dithering/'),
+    ).toEqual({
+      owner: 'MasterIceZ',
+      repo: '2110597-100',
+      ref: 'main',
+      path: 'lecture-dithering',
+    });
+  });
+
+  it('uses the containing directory of a blob URL', () => {
+    expect(parseRepoUrl('https://github.com/o/r/blob/dev/a/b/info.yaml')).toEqual({
+      owner: 'o',
+      repo: 'r',
+      ref: 'dev',
+      path: 'a/b',
     });
   });
 

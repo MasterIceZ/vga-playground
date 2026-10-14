@@ -3,6 +3,10 @@ import { Project } from '../examples/Project';
 export interface RepoRef {
   owner: string;
   repo: string;
+  /** Branch/tag/commit from a `/tree/<ref>/...` or `/blob/<ref>/...` URL */
+  ref?: string;
+  /** Project subdirectory within the repo (no leading/trailing slash) */
+  path?: string;
 }
 
 export function parseRepoUrl(input: string): RepoRef {
@@ -22,7 +26,15 @@ export function parseRepoUrl(input: string): RepoRef {
     throw new Error(`Invalid repo URL: ${input}`);
   }
 
-  return { owner, repo };
+  const result: RepoRef = { owner, repo };
+  if ((parts[2] === 'tree' || parts[2] === 'blob') && parts[3]) {
+    result.ref = parts[3];
+    const rest = parts.slice(4).filter(Boolean);
+    // A blob URL points at a file (e.g. info.yaml); use its directory
+    if (parts[2] === 'blob') rest.pop();
+    if (rest.length > 0) result.path = rest.join('/');
+  }
+  return result;
 }
 
 export interface ProjectInfo {
@@ -102,7 +114,10 @@ async function tryFetchFiles(
 }
 
 export async function loadProjectFromRepo(repoUrl: string, ref?: string | null): Promise<Project> {
-  const { owner, repo } = parseRepoUrl(repoUrl);
+  const { owner, repo, ref: urlRef, path: subdir } = parseRepoUrl(repoUrl);
+  ref = ref || urlRef;
+  const base = subdir ? `${subdir}/` : '';
+  const where = `${owner}/${repo}${subdir ? `/${subdir}` : ''}`;
 
   // Start loading YAML parser in parallel with the fetch
   const yamlModulePromise = import('yaml');
@@ -112,17 +127,17 @@ export async function loadProjectFromRepo(repoUrl: string, ref?: string | null):
 
   if (ref) {
     branch = ref;
-    const url = githubRawUrl(owner, repo, branch, 'info.yaml');
+    const url = githubRawUrl(owner, repo, branch, `${base}info.yaml`);
     const res = await fetch(url);
     if (!res.ok) {
-      throw new Error(`Could not fetch info.yaml from ${owner}/${repo} at ref "${ref}"`);
+      throw new Error(`Could not fetch info.yaml from ${where} at ref "${ref}"`);
     }
     infoYaml = await res.text();
   } else {
     // Auto-detect: try main, fall back to master
     branch = 'main';
     for (const b of ['main', 'master']) {
-      const url = githubRawUrl(owner, repo, b, 'info.yaml');
+      const url = githubRawUrl(owner, repo, b, `${base}info.yaml`);
       const res = await fetch(url);
       if (res.ok) {
         infoYaml = await res.text();
@@ -131,7 +146,7 @@ export async function loadProjectFromRepo(repoUrl: string, ref?: string | null):
       }
     }
     if (infoYaml == null) {
-      throw new Error(`Could not fetch info.yaml from ${owner}/${repo}`);
+      throw new Error(`Could not fetch info.yaml from ${where}`);
     }
   }
 
@@ -139,12 +154,12 @@ export async function loadProjectFromRepo(repoUrl: string, ref?: string | null):
   const { title, author, sourceFiles } = extractProjectInfo(parse(infoYaml));
 
   if (sourceFiles.length === 0) {
-    throw new Error(`No source files found in info.yaml for ${owner}/${repo}`);
+    throw new Error(`No source files found in info.yaml for ${where}`);
   }
 
   const entries = await Promise.all(
     sourceFiles.map(async (filename) => {
-      const url = githubRawUrl(owner, repo, branch, `src/${filename}`);
+      const url = githubRawUrl(owner, repo, branch, `${base}src/${filename}`);
       const res = await fetch(url);
       if (!res.ok) {
         throw new Error(`Failed to fetch ${filename}: ${res.status}`);
@@ -157,7 +172,7 @@ export async function loadProjectFromRepo(repoUrl: string, ref?: string | null):
 
   // Fetch header files referenced via `include
   const includeFiles = await tryFetchFiles(extractIncludePaths(sources), (f) =>
-    githubRawUrl(owner, repo, branch, `src/${f}`),
+    githubRawUrl(owner, repo, branch, `${base}src/${f}`),
   );
   for (const [name, content] of includeFiles) {
     sources[name] = content;
@@ -165,13 +180,13 @@ export async function loadProjectFromRepo(repoUrl: string, ref?: string | null):
 
   // Fetch data files referenced via $readmemh/$readmemb
   const dataEntries = await tryFetchFiles(extractReadmemPaths(sources), (p) =>
-    githubRawUrl(owner, repo, branch, resolveRelativeToSrc(p)),
+    githubRawUrl(owner, repo, branch, base + resolveRelativeToSrc(p)),
   );
   const dataFiles = dataEntries.length > 0 ? Object.fromEntries(dataEntries) : undefined;
 
   return {
-    id: `${owner}/${repo}`,
-    name: title || repo,
+    id: where,
+    name: title || subdir?.split('/').pop() || repo,
     author: author || owner,
     sources,
     dataFiles,
