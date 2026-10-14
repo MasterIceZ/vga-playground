@@ -8,6 +8,8 @@ export interface FileExplorerOptions {
   container: HTMLElement;
   editorModel: monaco.editor.ITextModel;
   getSources: () => Record<string, string>;
+  /** Files read via $readmem, keyed by the path as written (relative to src/) */
+  getDataFiles: () => Record<string, string> | undefined;
   getEditorValue: () => string;
   setEditorValue: (value: string) => void;
 }
@@ -32,20 +34,22 @@ export function isValidFileName(name: string) {
 
 export class FileExplorer {
   currentFileName = 'project.v';
+  /** Set while a data file (rather than a source file) is open in the editor */
+  currentDataFile: string | null = null;
   private readonly markersPerFile: Record<string, MarkerData[]> = {};
 
   private readonly container: HTMLElement;
   private readonly editorModel: monaco.editor.ITextModel;
   private readonly getSources: () => Record<string, string>;
+  private readonly getDataFiles: () => Record<string, string> | undefined;
   private readonly getEditorValue: () => string;
   private readonly setEditorValue: (value: string) => void;
 
   private readonly fileList: HTMLDivElement;
-  private readonly folderRow: HTMLButtonElement;
   private readonly contextMenu: HTMLDivElement;
   private readonly collapseButton: HTMLButtonElement;
 
-  private folderExpanded = true;
+  private readonly collapsedFolders = new Set<string>();
   private collapsed = false;
   private width = DEFAULT_WIDTH;
 
@@ -53,6 +57,7 @@ export class FileExplorer {
     this.container = opts.container;
     this.editorModel = opts.editorModel;
     this.getSources = opts.getSources;
+    this.getDataFiles = opts.getDataFiles;
     this.getEditorValue = opts.getEditorValue;
     this.setEditorValue = opts.setEditorValue;
 
@@ -90,14 +95,6 @@ export class FileExplorer {
     tree.setAttribute('role', 'tree');
     tree.setAttribute('aria-label', 'Project files');
 
-    this.folderRow = document.createElement('button');
-    this.folderRow.className = 'explorer-folder';
-    this.folderRow.addEventListener('click', () => {
-      this.folderExpanded = !this.folderExpanded;
-      this.render();
-    });
-    tree.appendChild(this.folderRow);
-
     this.fileList = document.createElement('div');
     this.fileList.className = 'explorer-files';
     this.fileList.addEventListener('keydown', (e) => this.onFileListKeyDown(e));
@@ -134,64 +131,48 @@ export class FileExplorer {
   }
 
   render() {
-    const sources = this.getSources();
-    const fileNames = sortFileNames(Object.keys(sources));
-
-    this.folderRow.innerHTML = `${this.folderExpanded ? ICON_CHEVRON_DOWN : ICON_CHEVRON_RIGHT}<span>src</span>`;
-    this.folderRow.setAttribute('aria-expanded', String(this.folderExpanded));
-    this.fileList.hidden = !this.folderExpanded;
+    const folders = new Map<string, { name: string; dataPath?: string }[]>([['src', []]]);
+    for (const fileName of sortFileNames(Object.keys(this.getSources()))) {
+      folders.get('src')!.push({ name: fileName });
+    }
+    const dataPaths = Object.keys(this.getDataFiles() ?? {}).sort((a, b) =>
+      dataFileDisplayPath(a).localeCompare(dataFileDisplayPath(b)),
+    );
+    for (const dataPath of dataPaths) {
+      const display = dataFileDisplayPath(dataPath);
+      const slash = display.lastIndexOf('/');
+      const folder = slash < 0 ? '' : display.slice(0, slash);
+      if (!folders.has(folder)) folders.set(folder, []);
+      folders.get(folder)!.push({ name: display.slice(slash + 1), dataPath });
+    }
 
     const hadFocus = this.fileList.contains(document.activeElement);
     this.fileList.innerHTML = '';
 
-    for (const fileName of fileNames) {
-      const markers = this.markersPerFile[fileName] ?? [];
-      const errorCount = markers.filter((m) => m.severity === monaco.MarkerSeverity.Error).length;
-      const isActive = fileName === this.currentFileName;
-
-      const row = document.createElement('div');
-      row.className = 'explorer-file';
-      row.setAttribute('role', 'treeitem');
-      row.dataset.fileName = fileName;
-      row.title = fileName;
-      row.tabIndex = isActive ? 0 : -1;
-
-      if (isActive) {
-        row.classList.add('active');
-        row.setAttribute('aria-selected', 'true');
+    for (const [folder, files] of folders) {
+      // Root-level data files have no folder row
+      const expanded = folder === '' || !this.collapsedFolders.has(folder);
+      if (folder !== '') {
+        const folderRow = document.createElement('button');
+        folderRow.className = 'explorer-folder';
+        folderRow.innerHTML = `${expanded ? ICON_CHEVRON_DOWN : ICON_CHEVRON_RIGHT}<span></span>`;
+        folderRow.querySelector('span')!.textContent = folder;
+        folderRow.setAttribute('aria-expanded', String(expanded));
+        folderRow.addEventListener('click', () => {
+          if (expanded) this.collapsedFolders.add(folder);
+          else this.collapsedFolders.delete(folder);
+          this.render();
+        });
+        this.fileList.appendChild(folderRow);
       }
-      if (errorCount > 0) {
-        row.classList.add('has-errors');
-      } else if (markers.length > 0) {
-        row.classList.add('has-warnings');
+      if (!expanded) continue;
+      for (const file of files) {
+        this.fileList.appendChild(
+          file.dataPath != null
+            ? this.dataFileRow(file.name, file.dataPath)
+            : this.sourceRow(file.name),
+        );
       }
-
-      const icon = document.createElement('span');
-      icon.className = 'file-icon';
-      icon.innerHTML = ICON_FILE;
-      row.appendChild(icon);
-
-      const label = document.createElement('span');
-      label.className = 'file-name';
-      label.textContent = fileName;
-      row.appendChild(label);
-
-      if (markers.length > 0) {
-        const badge = document.createElement('span');
-        badge.className = 'file-badge';
-        badge.textContent = String(errorCount > 0 ? errorCount : markers.length);
-        badge.title = `${markers.length} problem${markers.length === 1 ? '' : 's'}`;
-        row.appendChild(badge);
-      }
-
-      row.addEventListener('click', () => {
-        if (fileName !== this.currentFileName) {
-          this.switchTo(fileName);
-        }
-      });
-      row.addEventListener('contextmenu', (e) => this.showContextMenu(e, fileName));
-
-      this.fileList.appendChild(row);
     }
 
     if (hadFocus) {
@@ -199,11 +180,110 @@ export class FileExplorer {
     }
   }
 
-  switchTo(fileName: string) {
-    const sources = this.getSources();
-    sources[this.currentFileName] = this.getEditorValue();
+  private sourceRow(fileName: string) {
+    const markers = this.markersPerFile[fileName] ?? [];
+    const errorCount = markers.filter((m) => m.severity === monaco.MarkerSeverity.Error).length;
+    const row = this.fileRow(
+      fileName,
+      fileName,
+      this.currentDataFile == null && fileName === this.currentFileName,
+    );
+    row.dataset.fileName = fileName;
+
+    if (errorCount > 0) {
+      row.classList.add('has-errors');
+    } else if (markers.length > 0) {
+      row.classList.add('has-warnings');
+    }
+
+    if (markers.length > 0) {
+      const badge = document.createElement('span');
+      badge.className = 'file-badge';
+      badge.textContent = String(errorCount > 0 ? errorCount : markers.length);
+      badge.title = `${markers.length} problem${markers.length === 1 ? '' : 's'}`;
+      row.appendChild(badge);
+    }
+
+    row.addEventListener('click', () => {
+      if (this.currentDataFile != null || fileName !== this.currentFileName) {
+        this.switchTo(fileName);
+      }
+    });
+    row.addEventListener('contextmenu', (e) => this.showContextMenu(e, fileName));
+    return row;
+  }
+
+  private dataFileRow(name: string, dataPath: string) {
+    const row = this.fileRow(
+      name,
+      dataFileDisplayPath(dataPath),
+      dataPath === this.currentDataFile,
+    );
+    row.dataset.dataPath = dataPath;
+    row.addEventListener('click', () => {
+      if (dataPath !== this.currentDataFile) {
+        this.openDataFile(dataPath);
+      }
+    });
+    return row;
+  }
+
+  private fileRow(label: string, title: string, isActive: boolean) {
+    const row = document.createElement('div');
+    row.className = 'explorer-file';
+    row.setAttribute('role', 'treeitem');
+    row.title = title;
+    row.tabIndex = isActive ? 0 : -1;
+    if (isActive) {
+      row.classList.add('active');
+      row.setAttribute('aria-selected', 'true');
+    }
+
+    const icon = document.createElement('span');
+    icon.className = 'file-icon';
+    icon.innerHTML = ICON_FILE;
+    row.appendChild(icon);
+
+    const name = document.createElement('span');
+    name.className = 'file-name';
+    name.textContent = label;
+    row.appendChild(name);
+    return row;
+  }
+
+  /** Writes the editor's contents back to whichever file is open. */
+  private saveCurrent() {
+    const value = this.getEditorValue();
+    const dataFiles = this.getDataFiles();
+    if (this.currentDataFile != null && dataFiles) {
+      dataFiles[this.currentDataFile] = value;
+    } else {
+      this.getSources()[this.currentFileName] = value;
+    }
+  }
+
+  /** Points the explorer at a source file of a freshly loaded project, without saving. */
+  resetTo(fileName: string) {
     this.currentFileName = fileName;
-    this.setEditorValue(sources[this.currentFileName]);
+    this.currentDataFile = null;
+    monaco.editor.setModelLanguage(this.editorModel, 'systemverilog');
+  }
+
+  openDataFile(dataPath: string) {
+    this.saveCurrent();
+    this.currentDataFile = dataPath;
+    monaco.editor.setModelLanguage(this.editorModel, 'plaintext');
+    this.setEditorValue(this.getDataFiles()?.[dataPath] ?? '');
+    this.render();
+    this.updateEditorMarkers();
+  }
+
+  switchTo(fileName: string) {
+    this.saveCurrent();
+    this.currentFileName = fileName;
+    this.currentDataFile = null;
+    monaco.editor.setModelLanguage(this.editorModel, 'systemverilog');
+    this.setEditorValue(this.getSources()[this.currentFileName]);
     this.render();
     this.updateEditorMarkers();
   }
@@ -224,7 +304,8 @@ export class FileExplorer {
   }
 
   updateEditorMarkers() {
-    const markers = this.markersPerFile[this.currentFileName] ?? [];
+    const markers =
+      this.currentDataFile == null ? this.markersPerFile[this.currentFileName] ?? [] : [];
     monaco.editor.setModelMarkers(this.editorModel, 'error', markers);
   }
 
@@ -276,7 +357,8 @@ export class FileExplorer {
     const rows = Array.from(this.fileList.querySelectorAll<HTMLElement>('.explorer-file'));
     const index = rows.findIndex((row) => row === document.activeElement);
     if (index < 0) return;
-    const fileName = rows[index].dataset.fileName!;
+    // Data files can be opened but not renamed or deleted
+    const fileName = rows[index].dataset.fileName;
 
     switch (e.key) {
       case 'ArrowDown':
@@ -284,16 +366,22 @@ export class FileExplorer {
         e.preventDefault();
         const next = rows[index + (e.key === 'ArrowDown' ? 1 : -1)];
         if (next) {
-          this.switchTo(next.dataset.fileName!);
+          if (next.dataset.dataPath != null) {
+            this.openDataFile(next.dataset.dataPath);
+          } else {
+            this.switchTo(next.dataset.fileName!);
+          }
           this.activeRow()?.focus();
         }
         break;
       }
       case 'F2':
+        if (fileName == null) break;
         e.preventDefault();
         this.renameFile(fileName);
         break;
       case 'Delete':
+        if (fileName == null) break;
         e.preventDefault();
         this.deleteFile(fileName);
         break;
@@ -312,11 +400,13 @@ export class FileExplorer {
       alert('A file with that name already exists');
       return;
     }
-    sources[this.currentFileName] = this.getEditorValue();
+    this.saveCurrent();
     sources[name] = '';
     this.currentFileName = name;
+    this.currentDataFile = null;
+    monaco.editor.setModelLanguage(this.editorModel, 'systemverilog');
     this.setEditorValue('');
-    this.folderExpanded = true;
+    this.collapsedFolders.delete('src');
     this.render();
   }
 
@@ -348,7 +438,9 @@ export class FileExplorer {
     delete sources[fileName];
     if (this.currentFileName === fileName) {
       this.currentFileName = sortFileNames(Object.keys(sources))[0];
-      this.setEditorValue(sources[this.currentFileName]);
+      if (this.currentDataFile == null) {
+        this.setEditorValue(sources[this.currentFileName]);
+      }
     }
     this.render();
   }
@@ -379,6 +471,16 @@ export class FileExplorer {
     this.contextMenu.style.left = `${Math.min(e.clientX, window.innerWidth - width - 4)}px`;
     this.contextMenu.style.top = `${Math.min(e.clientY, window.innerHeight - height - 4)}px`;
   }
+}
+
+/** Maps a $readmem path (relative to src/) to its path from the project root. */
+export function dataFileDisplayPath(path: string) {
+  const resolved: string[] = [];
+  for (const part of `src/${path}`.split('/')) {
+    if (part === '..') resolved.pop();
+    else if (part !== '.' && part !== '') resolved.push(part);
+  }
+  return resolved.join('/');
 }
 
 /** Keeps the project's entry file on top, then sorts the rest like a file tree. */

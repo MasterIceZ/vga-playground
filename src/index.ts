@@ -71,6 +71,7 @@ const fileExplorer = new FileExplorer({
   container: document.getElementById('file-explorer')!,
   editorModel: editor.getModel()!,
   getSources: () => currentProject.sources,
+  getDataFiles: () => currentProject.dataFiles,
   getEditorValue: () => editor.getValue(),
   setEditorValue: (v) => {
     suppressEditorChange = true;
@@ -190,7 +191,11 @@ editor.onDidChangeModelContent(async () => {
     return;
   }
   stopped = true;
-  currentProject.sources[fileExplorer.currentFileName] = editor.getValue();
+  if (fileExplorer.currentDataFile != null && currentProject.dataFiles) {
+    currentProject.dataFiles[fileExplorer.currentDataFile] = editor.getValue();
+  } else {
+    currentProject.sources[fileExplorer.currentFileName] = editor.getValue();
+  }
   const res = await compileVerilator({
     topModule: detectTopModule(currentProject.sources),
     sources: currentProject.sources,
@@ -265,7 +270,7 @@ const presetBar = initPresetBar({
   onSelect: (example) => {
     currentProject = structuredClone(example);
     const first = Object.keys(currentProject.sources)[0];
-    fileExplorer.currentFileName = first;
+    fileExplorer.resetTo(first);
     editor.setValue(currentProject.sources[first]);
     fileExplorer.render();
   },
