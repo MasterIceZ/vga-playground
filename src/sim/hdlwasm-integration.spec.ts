@@ -855,6 +855,41 @@ describe('Full Verilog -> WASM Pipeline', () => {
       mod.dispose();
     });
 
+    test.each(['a.mh', 'a.hex', 'abcd.hex'])(
+      'should load a file with a short name (%s)',
+      async (filename) => {
+        // Regression: Verilator passes a filename of up to 8 characters by
+        // value rather than by reference, so the call didn't match the
+        // import's pointer parameter and the module failed to validate.
+        const verilog = `
+          module readmem_short(
+            input wire [1:0] idx,
+            output wire [7:0] val
+          );
+            reg [7:0] mem[0:3];
+            initial begin
+              $readmemh("${filename}", mem);
+            end
+            assign val = mem[idx];
+          endmodule
+        `;
+        const mod = await compileAndCreate('readmem_short', { 'readmem_short.v': verilog });
+        let requested;
+        mod.getFileData = (fn) => {
+          requested = fn;
+          return '11 22 33 44';
+        };
+        mod.powercycle();
+        expect(requested).toBe(filename);
+        for (const [i, expected] of [0x11, 0x22, 0x33, 0x44].entries()) {
+          mod.state.idx = i;
+          mod.eval();
+          expect(mod.state.val).toBe(expected);
+        }
+        mod.dispose();
+      },
+    );
+
     test('should load a memory that is only used by its $readmem', async () => {
       // Regression: Verilator moves an array whose only user is the initial
       // block into that block's function; the array was promoted to a global

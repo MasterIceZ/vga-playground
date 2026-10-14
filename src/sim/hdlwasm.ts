@@ -58,6 +58,7 @@ const TRACEOFS = '$$tofs';
 const TRACEEND = '$$tend';
 const TRACEBUF = '$$tbuf';
 const READMEM_FUNC = '$readmem_4';
+const READMEM_FNBUF = '$$readmemfn';
 
 ///
 
@@ -457,6 +458,9 @@ export class HDLModuleWASM implements HDLModuleRunner {
     state.addEntry(TRACEEND, 4, binaryen.i32);
     state.addEntry(TRACEBUF, this.traceBufferSize);
     this.traceRecordSize = this.outputbytes;
+    // a $readmem filename that fits in 64 bits is passed by value; it is
+    // copied here (plus a NUL terminator) so the runtime gets a pointer
+    state.addEntry(READMEM_FNBUF, 16);
     // function locals of reference type (e.g. an array Verilator moved into the
     // initial block that is its only user) get promoted to globals; place them
     // here so memory is sized to fit them
@@ -1033,6 +1037,26 @@ export class HDLModuleWASM implements HDLModuleRunner {
       var dest = e.args[1];
       if (!hasDataType(dest) || !isArrayType(dest.dtype)) {
         throw new HDLError(e, `$readmem destination must be an array`);
+      }
+      var filename = e.args[0];
+      if (hasDataType(filename) && !isReferenceType(filename.dtype)) {
+        var fnbuf = this.globals.lookup(READMEM_FNBUF)!;
+        args[1] = this.bmod.block(
+          null,
+          [
+            this.bmod.i64.store(fnbuf.offset, 8, this.dataptr(), this.bmod.i64.const(0, 0)),
+            this.bmod.i64.store(fnbuf.offset + 8, 8, this.dataptr(), this.bmod.i64.const(0, 0)),
+            this.storemem(
+              filename,
+              this.dataptr(),
+              fnbuf.offset,
+              getDataTypeSize(filename.dtype),
+              args[1],
+            ),
+            this.bmod.i32.const(fnbuf.offset),
+          ],
+          binaryen.i32,
+        );
       }
       var elemsize = getArrayElementSizeFromType(dest.dtype);
       args.push(this.bmod.i32.const(elemsize));
